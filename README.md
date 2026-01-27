@@ -2,7 +2,7 @@
 
 Praktor is a fully functional code-editing AI agent built in Go. Inspired by the [ampcode.com guide](https://ampcode.com/how-to-build-an-agent), Praktor demonstrates how a powerful AI agent can be built with less than 400 lines of code.
 
-Praktor uses Claude 3.5 Sonnet through [OpenRouter](https://openrouter.ai/), giving you access to one of the most capable AI models for code editing and analysis tasks.
+Praktor uses Claude Sonnet 4.5 through [OpenRouter](https://openrouter.ai/), giving you access to one of the most capable AI models for code editing and analysis tasks.
 
 ## Features
 
@@ -144,7 +144,7 @@ Praktor will list files, read the relevant ones, and provide a summary.
 
 Praktor is built on three simple concepts:
 
-1. **LLM**: Uses Claude 3.5 Sonnet via OpenRouter API
+1. **LLM**: Uses Claude Sonnet 4.5 via OpenRouter API
 2. **Loop**: Maintains a conversation loop with context
 3. **Tools**: Provides three filesystem tools that Claude can use
 
@@ -178,7 +178,7 @@ When you send a message:
        ▼
 ┌─────────────────────────────┐
 │   OpenRouter API            │
-│   (Claude 3.5 Sonnet)       │
+│   (Claude Sonnet 4.5)      │
 └─────────────────────────────┘
        ▲
        │
@@ -192,7 +192,7 @@ When you send a message:
 
 ## Model Configuration
 
-By default, Praktor uses `anthropic/claude-3.5-sonnet` via OpenRouter. To use a different model, modify the `Model` parameter in `main.go`:
+By default, Praktor uses `anthropic/claude-sonnet-4.5` via OpenRouter. To use a different model, modify the `Model` parameter in `main.go`:
 
 ```go
 Model: anthropic.Model("anthropic/claude-3-opus"),

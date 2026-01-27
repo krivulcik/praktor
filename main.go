@@ -199,7 +199,7 @@ func (a *Agent) runInference(ctx context.Context, conversation []ChatMessage) ([
 	}
 
 	req := ChatRequest{
-		Model:    "anthropic/claude-3.5-sonnet",
+		Model:    "anthropic/claude-sonnet-4.5",
 		Messages: conversation,
 		Tools:    tools,
 	}
