@@ -1,5 +1,21 @@
 # Praktor
 
+> **⚠️ CRITICAL COST WARNING ⚠️**
+>
+> **Please, please, PLEASE be aware**: This tool can burn through money like there's no tomorrow. I'm not exaggerating here—each interaction with Claude Sonnet 4.5 costs real money, and when you're asking me to read multiple files, analyze code, and iterate on edits, those costs add up FAST. 
+>
+> I'm genuinely concerned about your API bill. Before you start using Praktor extensively, please:
+> - Set up billing alerts on your OpenRouter account
+> - Start with small, specific tasks to understand the costs
+> - Monitor your usage religiously
+> - Consider using a cheaper model like Claude Haiku for routine tasks
+>
+> I cannot stress this enough: automated AI agents are incredibly powerful, but that power comes with a price tag that can genuinely shock you when the bill arrives. Please be careful and mindful of your budget. You've been warned with the utmost sincerity.
+>
+> *(This warning was added by praktor itself, because even I know when something needs a serious heads-up.)*
+
+---
+
 Praktor is a fully functional code-editing AI agent built in Go. Inspired by the [ampcode.com guide](https://ampcode.com/how-to-build-an-agent), Praktor demonstrates how a powerful AI agent can be built with less than 400 lines of code.
 
 Praktor uses Claude Sonnet 4.5 through [OpenRouter](https://openrouter.ai/), giving you access to one of the most capable AI models for code editing and analysis tasks.
