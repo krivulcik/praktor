@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/invopop/jsonschema"
 )
 
@@ -281,10 +280,14 @@ func (a *Agent) executeTool(id, name string, arguments string) string {
 }
 
 type ToolDefinition struct {
-	Name        string                         `json:"name"`
-	Description string                         `json:"description"`
-	InputSchema anthropic.ToolInputSchemaParam `json:"input_schema"`
+	Name        string
+	Description string
+	InputSchema ToolInputSchema
 	Function    func(input []byte) (string, error)
+}
+
+type ToolInputSchema struct {
+	Properties interface{}
 }
 
 var ReadFileDefinition = ToolDefinition{
@@ -446,7 +449,7 @@ func createNewFile(filePath, content string) (string, error) {
 	return fmt.Sprintf("Successfully created file %s", filePath), nil
 }
 
-func GenerateSchema[T any]() anthropic.ToolInputSchemaParam {
+func GenerateSchema[T any]() ToolInputSchema {
 	reflector := jsonschema.Reflector{
 		AllowAdditionalProperties: false,
 		DoNotReference:            true,
@@ -455,7 +458,7 @@ func GenerateSchema[T any]() anthropic.ToolInputSchemaParam {
 
 	schema := reflector.Reflect(v)
 
-	return anthropic.ToolInputSchemaParam{
+	return ToolInputSchema{
 		Properties: schema.Properties,
 	}
 }
