@@ -2,16 +2,18 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
+	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/invopop/jsonschema"
 )
 
@@ -22,14 +24,6 @@ func main() {
 		fmt.Println("Error: OPENROUTER_API_KEY environment variable is not set")
 		os.Exit(1)
 	}
-
-	// Create client with OpenRouter base URL
-	client := anthropic.NewClient(
-		option.WithAPIKey(apiKey),
-		option.WithBaseURL("https://openrouter.ai/api/v1"),
-		option.WithHeader("HTTP-Referer", "https://praktor.ai"),
-		option.WithHeader("X-Title", "Praktor"),
-	)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	getUserMessage := func() (string, bool) {
@@ -45,7 +39,7 @@ func main() {
 		EditFileDefinition,
 	}
 
-	agent := NewAgent(&client, getUserMessage, tools)
+	agent := NewAgent(apiKey, getUserMessage, tools)
 	err := agent.Run(context.TODO())
 	if err != nil {
 		fmt.Printf("Error: %s\n", err.Error())
@@ -53,25 +47,74 @@ func main() {
 }
 
 func NewAgent(
-	client *anthropic.Client,
+	apiKey string,
 	getUserMessage func() (string, bool),
 	tools []ToolDefinition,
 ) *Agent {
 	return &Agent{
-		client:         client,
+		apiKey:         apiKey,
 		getUserMessage: getUserMessage,
 		tools:          tools,
+		client:         &http.Client{},
 	}
 }
 
 type Agent struct {
-	client         *anthropic.Client
+	apiKey         string
 	getUserMessage func() (string, bool)
 	tools          []ToolDefinition
+	client         *http.Client
+}
+
+type ChatMessage struct {
+	Role       string      `json:"role"`
+	Content    string      `json:"content"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+}
+
+type ToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type ChatResponse struct {
+	ID      string `json:"id"`
+	Choices []struct {
+		Message struct {
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+		} `json:"message"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    interface{} `json:"code"`
+	} `json:"error,omitempty"`
+}
+
+type ChatRequest struct {
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	Tools    []ToolDef     `json:"tools,omitempty"`
+}
+
+type ToolDef struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		Parameters  map[string]interface{} `json:"parameters"`
+	} `json:"function"`
 }
 
 func (a *Agent) Run(ctx context.Context) error {
-	conversation := []anthropic.MessageParam{}
+	conversation := []ChatMessage{}
 
 	fmt.Println("Chat with Praktor powered by OpenRouter (use 'ctrl-c' to quit)")
 
@@ -84,59 +127,136 @@ func (a *Agent) Run(ctx context.Context) error {
 				break
 			}
 
-			userMessage := anthropic.NewUserMessage(anthropic.NewTextBlock(userInput))
-			conversation = append(conversation, userMessage)
+			conversation = append(conversation, ChatMessage{
+				Role:    "user",
+				Content: userInput,
+			})
 		}
 
-		message, err := a.runInference(ctx, conversation)
+		toolCalls, responseText, err := a.runInference(ctx, conversation)
 		if err != nil {
 			return err
 		}
-		conversation = append(conversation, message.ToParam())
 
-		toolResults := []anthropic.ContentBlockParamUnion{}
-		for _, content := range message.Content {
-			switch content.Type {
-			case "text":
-				fmt.Printf("\u001b[93mPraktor\u001b[0m: %s\n", content.Text)
-			case "tool_use":
-				result := a.executeTool(content.ID, content.Name, content.Input)
-				toolResults = append(toolResults, result)
-			}
+		if responseText != "" {
+			fmt.Printf("\u001b[93mPraktor\u001b[0m: %s\n", responseText)
+			conversation = append(conversation, ChatMessage{
+				Role:    "assistant",
+				Content: responseText,
+			})
 		}
-		if len(toolResults) == 0 {
+
+		if len(toolCalls) == 0 {
 			readUserInput = true
 			continue
 		}
+
+		// Add assistant message with tool calls to conversation
+		asstMsgBytes, _ := json.Marshal(struct {
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
+		}{
+			Role:      "assistant",
+			Content:   responseText,
+			ToolCalls: toolCalls,
+		})
+		var asstMsgParsed ChatMessage
+		json.Unmarshal(asstMsgBytes, &asstMsgParsed)
+		conversation = append(conversation, asstMsgParsed)
+
+		// Execute tools
+		for _, toolCall := range toolCalls {
+			result := a.executeTool(toolCall.ID, toolCall.Function.Name, toolCall.Function.Arguments)
+			conversation = append(conversation, ChatMessage{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: toolCall.ID,
+			})
+		}
+
 		readUserInput = false
-		conversation = append(conversation, anthropic.NewUserMessage(toolResults...))
 	}
 
 	return nil
 }
 
-func (a *Agent) runInference(ctx context.Context, conversation []anthropic.MessageParam) (*anthropic.Message, error) {
-	anthropicTools := []anthropic.ToolUnionParam{}
+func (a *Agent) runInference(ctx context.Context, conversation []ChatMessage) ([]ToolCall, string, error) {
+	// Convert tools to OpenAI format
+	tools := []ToolDef{}
 	for _, tool := range a.tools {
-		anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{
-			OfTool: &anthropic.ToolParam{
-				Name:        tool.Name,
-				Description: anthropic.String(tool.Description),
-				InputSchema: tool.InputSchema,
-			},
-		})
+		params := map[string]interface{}{
+			"type":       "object",
+			"properties": tool.InputSchema.Properties,
+		}
+		td := ToolDef{
+			Type: "function",
+		}
+		td.Function.Name = tool.Name
+		td.Function.Description = tool.Description
+		td.Function.Parameters = params
+		tools = append(tools, td)
 	}
 
-	message, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     anthropic.Model("anthropic/claude-3.5-sonnet"),
-		MaxTokens: int64(4096),
-		Messages:  conversation,
-		Tools:     anthropicTools,
-	})
-	return message, err
+	req := ChatRequest{
+		Model:    "anthropic/claude-3.5-sonnet",
+		Messages: conversation,
+		Tools:    tools,
+	}
+
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, "", err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://openrouter.ai/api/v1/chat/completions", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, "", err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+	httpReq.Header.Set("HTTP-Referer", "https://praktor.ai")
+	httpReq.Header.Set("X-Title", "Praktor")
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("API error: %s", string(body))
+	}
+
+	var response ChatResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, "", err
+	}
+
+	if response.Error != nil {
+		return nil, "", fmt.Errorf("API error: %s", response.Error.Message)
+	}
+
+	if len(response.Choices) == 0 {
+		return nil, "", fmt.Errorf("no choices in response")
+	}
+
+	choice := response.Choices[0]
+	var toolCalls []ToolCall
+	if len(choice.Message.ToolCalls) > 0 {
+		toolCalls = choice.Message.ToolCalls
+	}
+
+	return toolCalls, choice.Message.Content, nil
 }
 
-func (a *Agent) executeTool(id, name string, input json.RawMessage) anthropic.ContentBlockParamUnion {
+func (a *Agent) executeTool(id, name string, arguments string) string {
 	var toolDef ToolDefinition
 	var found bool
 	for _, tool := range a.tools {
@@ -147,22 +267,22 @@ func (a *Agent) executeTool(id, name string, input json.RawMessage) anthropic.Co
 		}
 	}
 	if !found {
-		return anthropic.NewToolResultBlock(id, "tool not found", true)
+		return fmt.Sprintf("Error: tool not found")
 	}
 
-	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, input)
-	response, err := toolDef.Function(input)
+	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, arguments)
+	response, err := toolDef.Function([]byte(arguments))
 	if err != nil {
-		return anthropic.NewToolResultBlock(id, err.Error(), true)
+		return fmt.Sprintf("Error: %s", err.Error())
 	}
-	return anthropic.NewToolResultBlock(id, response, false)
+	return response
 }
 
 type ToolDefinition struct {
 	Name        string                         `json:"name"`
 	Description string                         `json:"description"`
 	InputSchema anthropic.ToolInputSchemaParam `json:"input_schema"`
-	Function    func(input json.RawMessage) (string, error)
+	Function    func(input []byte) (string, error)
 }
 
 var ReadFileDefinition = ToolDefinition{
@@ -178,7 +298,7 @@ type ReadFileInput struct {
 
 var ReadFileInputSchema = GenerateSchema[ReadFileInput]()
 
-func ReadFile(input json.RawMessage) (string, error) {
+func ReadFile(input []byte) (string, error) {
 	readFileInput := ReadFileInput{}
 	err := json.Unmarshal(input, &readFileInput)
 	if err != nil {
@@ -205,11 +325,14 @@ type ListFilesInput struct {
 
 var ListFilesInputSchema = GenerateSchema[ListFilesInput]()
 
-func ListFiles(input json.RawMessage) (string, error) {
+func ListFiles(input []byte) (string, error) {
 	listFilesInput := ListFilesInput{}
-	err := json.Unmarshal(input, &listFilesInput)
-	if err != nil {
-		panic(err)
+	// Handle empty input or "{}"
+	if len(input) > 0 && !bytes.Equal(input, []byte("{}")) {
+		err := json.Unmarshal(input, &listFilesInput)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	dir := "."
@@ -218,7 +341,7 @@ func ListFiles(input json.RawMessage) (string, error) {
 	}
 
 	var files []string
-	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -238,8 +361,8 @@ func ListFiles(input json.RawMessage) (string, error) {
 		return nil
 	})
 
-	if err != nil {
-		return "", err
+	if walkErr != nil {
+		return "", walkErr
 	}
 
 	result, err := json.Marshal(files)
@@ -270,7 +393,7 @@ type EditFileInput struct {
 
 var EditFileInputSchema = GenerateSchema[EditFileInput]()
 
-func EditFile(input json.RawMessage) (string, error) {
+func EditFile(input []byte) (string, error) {
 	editFileInput := EditFileInput{}
 	err := json.Unmarshal(input, &editFileInput)
 	if err != nil {
