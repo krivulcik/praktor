@@ -99,9 +99,10 @@ type ChatResponse struct {
 }
 
 type ChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Tools    []ToolDef     `json:"tools,omitempty"`
+	Model     string        `json:"model"`
+	Messages  []ChatMessage `json:"messages"`
+	Tools     []ToolDef     `json:"tools,omitempty"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
 }
 
 type ToolDef struct {
@@ -199,9 +200,10 @@ func (a *Agent) runInference(ctx context.Context, conversation []ChatMessage) ([
 	}
 
 	req := ChatRequest{
-		Model:    "anthropic/claude-sonnet-4.5",
-		Messages: conversation,
-		Tools:    tools,
+		Model:     "anthropic/claude-sonnet-4.5",
+		Messages:  conversation,
+		Tools:     tools,
+		MaxTokens: 4096,
 	}
 
 	reqBody, err := json.Marshal(req)
