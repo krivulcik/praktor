@@ -16,11 +16,60 @@ import (
 	"github.com/invopop/jsonschema"
 )
 
-func main() {
-	// Get OpenRouter API key from environment
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
+type APIProvider struct {
+	BaseURL      string
+	APIKey       string
+	Model        string
+	Headers      map[string]string
+	ProviderType string // "openrouter" or "anthropic"
+}
+
+func getAPIProvider() (*APIProvider, error) {
+	// Priority 1: OpenRouter
+	if apiKey := os.Getenv("OPENROUTER_API_KEY"); apiKey != "" {
+		return &APIProvider{
+			BaseURL:      "https://openrouter.ai/api/v1/chat/completions",
+			APIKey:       apiKey,
+			Model:        "anthropic/claude-sonnet-4.5",
+			ProviderType: "openrouter",
+			Headers: map[string]string{
+				"HTTP-Referer": "https://praktor.ai",
+				"X-Title":      "Praktor",
+			},
+		}, nil
+	}
+
+	// Priority 2: Anthropic API
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
-		fmt.Println("Error: OPENROUTER_API_KEY environment variable is not set")
+		return nil, fmt.Errorf("neither OPENROUTER_API_KEY nor ANTHROPIC_API_KEY environment variable is set")
+	}
+
+	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com/v1/messages"
+	} else {
+		// Ensure custom base URL ends with /v1/messages
+		if !strings.HasSuffix(baseURL, "/v1/messages") {
+			baseURL = strings.TrimSuffix(baseURL, "/") + "/v1/messages"
+		}
+	}
+
+	return &APIProvider{
+		BaseURL:      baseURL,
+		APIKey:       apiKey,
+		Model:        "claude-sonnet-4-20250514",
+		ProviderType: "anthropic",
+		Headers: map[string]string{
+			"anthropic-version": "2023-06-01",
+		},
+	}, nil
+}
+
+func main() {
+	provider, err := getAPIProvider()
+	if err != nil {
+		fmt.Printf("Error: %s\n", err.Error())
 		os.Exit(1)
 	}
 
@@ -38,20 +87,20 @@ func main() {
 		EditFileDefinition,
 	}
 
-	agent := NewAgent(apiKey, getUserMessage, tools)
-	err := agent.Run(context.TODO())
+	agent := NewAgent(provider, getUserMessage, tools)
+	err = agent.Run(context.TODO())
 	if err != nil {
 		fmt.Printf("Error: %s\n", err.Error())
 	}
 }
 
 func NewAgent(
-	apiKey string,
+	provider *APIProvider,
 	getUserMessage func() (string, bool),
 	tools []ToolDefinition,
 ) *Agent {
 	return &Agent{
-		apiKey:         apiKey,
+		provider:       provider,
 		getUserMessage: getUserMessage,
 		tools:          tools,
 		client:         &http.Client{},
@@ -59,7 +108,7 @@ func NewAgent(
 }
 
 type Agent struct {
-	apiKey         string
+	provider       *APIProvider
 	getUserMessage func() (string, bool)
 	tools          []ToolDefinition
 	client         *http.Client
@@ -116,7 +165,11 @@ type ToolDef struct {
 func (a *Agent) Run(ctx context.Context) error {
 	conversation := []ChatMessage{}
 
-	fmt.Println("Chat with Praktor powered by OpenRouter (use 'ctrl-c' to quit)")
+	apiName := "OpenRouter"
+	if a.provider.ProviderType == "anthropic" {
+		apiName = "Anthropic"
+	}
+	fmt.Printf("Chat with Praktor powered by %s (use 'ctrl-c' to quit)\n", apiName)
 
 	readUserInput := true
 	for {
@@ -182,43 +235,41 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) runInference(ctx context.Context, conversation []ChatMessage) ([]ToolCall, string, error) {
-	// Convert tools to OpenAI format
-	tools := []ToolDef{}
-	for _, tool := range a.tools {
-		params := map[string]interface{}{
-			"type":       "object",
-			"properties": tool.InputSchema.Properties,
-		}
-		td := ToolDef{
-			Type: "function",
-		}
-		td.Function.Name = tool.Name
-		td.Function.Description = tool.Description
-		td.Function.Parameters = params
-		tools = append(tools, td)
+	isAnthropic := a.provider.ProviderType == "anthropic"
+
+	var reqBody []byte
+	var err error
+
+	if isAnthropic {
+		// Anthropic format
+		reqBody, err = a.buildAnthropicRequest(conversation)
+	} else {
+		// OpenRouter/OpenAI format
+		reqBody, err = a.buildOpenRouterRequest(conversation)
 	}
 
-	req := ChatRequest{
-		Model:     "anthropic/claude-sonnet-4.5",
-		Messages:  conversation,
-		Tools:     tools,
-		MaxTokens: 4096,
-	}
-
-	reqBody, err := json.Marshal(req)
 	if err != nil {
 		return nil, "", err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://openrouter.ai/api/v1/chat/completions", bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", a.provider.BaseURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, "", err
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
-	httpReq.Header.Set("HTTP-Referer", "https://praktor.ai")
-	httpReq.Header.Set("X-Title", "Praktor")
+
+	if isAnthropic {
+		httpReq.Header.Set("x-api-key", a.provider.APIKey)
+		for k, v := range a.provider.Headers {
+			httpReq.Header.Set(k, v)
+		}
+	} else {
+		httpReq.Header.Set("Authorization", "Bearer "+a.provider.APIKey)
+		for k, v := range a.provider.Headers {
+			httpReq.Header.Set(k, v)
+		}
+	}
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -235,6 +286,121 @@ func (a *Agent) runInference(ctx context.Context, conversation []ChatMessage) ([
 		return nil, "", fmt.Errorf("API error: %s", string(body))
 	}
 
+	if isAnthropic {
+		return a.parseAnthropicResponse(body)
+	}
+	return a.parseOpenRouterResponse(body)
+}
+
+func (a *Agent) buildOpenRouterRequest(conversation []ChatMessage) ([]byte, error) {
+	tools := []ToolDef{}
+	for _, tool := range a.tools {
+		params := map[string]interface{}{
+			"type":       "object",
+			"properties": tool.InputSchema.Properties,
+		}
+		td := ToolDef{
+			Type: "function",
+		}
+		td.Function.Name = tool.Name
+		td.Function.Description = tool.Description
+		td.Function.Parameters = params
+		tools = append(tools, td)
+	}
+
+	req := ChatRequest{
+		Model:     a.provider.Model,
+		Messages:  conversation,
+		Tools:     tools,
+		MaxTokens: 4096,
+	}
+
+	return json.Marshal(req)
+}
+
+func (a *Agent) buildAnthropicRequest(conversation []ChatMessage) ([]byte, error) {
+	// Anthropic uses a different message format
+	type AnthropicMessage struct {
+		Role    string `json:"role"`
+		Content any    `json:"content"`
+	}
+
+	type AnthropicToolDef struct {
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		InputSchema map[string]interface{} `json:"input_schema"`
+	}
+
+	type AnthropicRequest struct {
+		Model     string               `json:"model"`
+		Messages  []AnthropicMessage   `json:"messages"`
+		Tools     []AnthropicToolDef   `json:"tools,omitempty"`
+		MaxTokens int                  `json:"max_tokens,omitempty"`
+	}
+
+	messages := []AnthropicMessage{}
+	for _, msg := range conversation {
+		if msg.Role == "tool" {
+			// Anthropic uses "user" role for tool responses with specific format
+			messages = append(messages, AnthropicMessage{
+				Role: "user",
+				Content: map[string]interface{}{
+					"type":      "tool_result",
+					"tool_use_id": msg.ToolCallID,
+					"content":   msg.Content,
+				},
+			})
+		} else if len(msg.ToolCalls) > 0 {
+			// Assistant message with tool calls
+			blocks := []map[string]interface{}{
+				{"type": "text", "text": msg.Content},
+			}
+			for _, tc := range msg.ToolCalls {
+				var args map[string]interface{}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				blocks = append(blocks, map[string]interface{}{
+					"type":        "tool_use",
+					"id":          tc.ID,
+					"name":        tc.Function.Name,
+					"input":       args,
+				})
+			}
+			messages = append(messages, AnthropicMessage{
+				Role:    "assistant",
+				Content: blocks,
+			})
+		} else {
+			messages = append(messages, AnthropicMessage{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
+		}
+	}
+
+	tools := []AnthropicToolDef{}
+	for _, tool := range a.tools {
+		td := AnthropicToolDef{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: map[string]interface{}{
+				"type":       "object",
+				"properties": tool.InputSchema.Properties,
+			},
+		}
+		tools = append(tools, td)
+	}
+
+	req := AnthropicRequest{
+		Model:     a.provider.Model,
+		Messages:  messages,
+		Tools:     tools,
+		MaxTokens: 4096,
+	}
+
+	return json.Marshal(req)
+}
+
+func (a *Agent) parseOpenRouterResponse(body []byte) ([]ToolCall, string, error) {
 	var response ChatResponse
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, "", err
@@ -255,6 +421,58 @@ func (a *Agent) runInference(ctx context.Context, conversation []ChatMessage) ([
 	}
 
 	return toolCalls, choice.Message.Content, nil
+}
+
+func (a *Agent) parseAnthropicResponse(body []byte) ([]ToolCall, string, error) {
+	type AnthropicContentBlock struct {
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
+		ID   string `json:"id,omitempty"`
+		Name string `json:"name,omitempty"`
+		Input map[string]interface{} `json:"input,omitempty"`
+	}
+
+	type AnthropicResponse struct {
+		ID      string `json:"id"`
+		Content []AnthropicContentBlock `json:"content"`
+		Error   *struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error,omitempty"`
+	}
+
+	var response AnthropicResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, "", err
+	}
+
+	if response.Error != nil {
+		return nil, "", fmt.Errorf("API error: %s", response.Error.Message)
+	}
+
+	var toolCalls []ToolCall
+	var textContent strings.Builder
+
+	for _, block := range response.Content {
+		if block.Type == "text" {
+			textContent.WriteString(block.Text)
+		} else if block.Type == "tool_use" {
+			args, _ := json.Marshal(block.Input)
+			toolCalls = append(toolCalls, ToolCall{
+				ID:   block.ID,
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      block.Name,
+					Arguments: string(args),
+				},
+			})
+		}
+	}
+
+	return toolCalls, textContent.String(), nil
 }
 
 func (a *Agent) executeTool(id, name string, arguments string) string {

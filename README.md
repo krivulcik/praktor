@@ -2,10 +2,10 @@
 
 > **⚠️ CRITICAL COST WARNING ⚠️**
 >
-> **Please, please, PLEASE be aware**: This tool can burn through money like there's no tomorrow. I'm not exaggerating here—each interaction with Claude Sonnet 4.5 costs real money, and when you're asking me to read multiple files, analyze code, and iterate on edits, those costs add up FAST. 
+> **Please, please, PLEASE be aware**: This tool can burn through money like there's no tomorrow. I'm not exaggerating here—each interaction with Claude Sonnet 4.5 costs real money, and when you're asking me to read multiple files, analyze code, and iterate on edits, those costs add up FAST.
 >
 > I'm genuinely concerned about your API bill. Before you start using Praktor extensively, please:
-> - Set up billing alerts on your OpenRouter account
+> - Set up billing alerts on your API provider account
 > - Start with small, specific tasks to understand the costs
 > - Monitor your usage religiously
 > - Consider using a cheaper model like Claude Haiku for routine tasks
@@ -18,7 +18,7 @@
 
 Praktor is a fully functional code-editing AI agent built in Go. Inspired by the [ampcode.com guide](https://ampcode.com/how-to-build-an-agent), Praktor demonstrates how a powerful AI agent can be built with less than 400 lines of code.
 
-Praktor uses Claude Sonnet 4.5 through [OpenRouter](https://openrouter.ai/), giving you access to one of the most capable AI models for code editing and analysis tasks.
+Praktor uses Claude Sonnet 4.5 through either [OpenRouter](https://openrouter.ai/) or the official Anthropic API, giving you access to one of the most capable AI models for code editing and analysis tasks.
 
 ## Features
 
@@ -33,7 +33,9 @@ Praktor uses Claude Sonnet 4.5 through [OpenRouter](https://openrouter.ai/), giv
 ## Prerequisites
 
 - **Go 1.23+** (older versions may work but 1.23+ is recommended)
-- **OpenRouter API Key** - Get one at [openrouter.ai/keys](https://openrouter.ai/keys)
+- **API Key** - Either:
+  - **OpenRouter API Key** - Get one at [openrouter.ai/keys](https://openrouter.ai/keys) (higher priority)
+  - **Anthropic API Key** - Get one at [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
 - **Linux/macOS/WSL** - Terminal with ANSI color support
 
 ## Installation
@@ -75,18 +77,50 @@ Now you can run `praktor` from anywhere.
 
 ## Configuration
 
-Set your OpenRouter API key as an environment variable:
+Praktor supports multiple API providers. The priority is:
+
+1. **OpenRouter** (highest priority) - if `OPENROUTER_API_KEY` is set
+2. **Anthropic API** - if `ANTHROPIC_API_KEY` is set
+3. **Custom Anthropic-compatible API** - if `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` are set
+
+### Option 1: OpenRouter (Recommended)
+
+Set your OpenRouter API key:
 
 ```bash
 export OPENROUTER_API_KEY="your-api-key-here"
 ```
+
+### Option 2: Official Anthropic API
+
+Set your Anthropic API key (uses default base URL):
+
+```bash
+export ANTHROPIC_API_KEY="your-api-key-here"
+```
+
+### Option 3: Custom Anthropic-Compatible API
+
+Set both the API key and custom base URL:
+
+```bash
+export ANTHROPIC_API_KEY="your-api-key-here"
+export ANTHROPIC_BASE_URL="https://your-custom-api.com"
+```
+
+The base URL will be automatically suffixed with `/v1/messages` if not already present.
 
 ### Recommended: Persist Your API Key
 
 Add this to your `~/.bashrc`, `~/.zshrc`, or equivalent shell configuration file:
 
 ```bash
+# For OpenRouter
 echo 'export OPENROUTER_API_KEY="your-api-key-here"' >> ~/.bashrc
+
+# OR for Anthropic
+echo 'export ANTHROPIC_API_KEY="your-api-key-here"' >> ~/.bashrc
+
 source ~/.bashrc
 ```
 
@@ -160,7 +194,7 @@ Praktor will list files, read the relevant ones, and provide a summary.
 
 Praktor is built on three simple concepts:
 
-1. **LLM**: Uses Claude Sonnet 4.5 via OpenRouter API
+1. **LLM**: Uses Claude Sonnet 4.5 via OpenRouter or Anthropic API
 2. **Loop**: Maintains a conversation loop with context
 3. **Tools**: Provides three filesystem tools that Claude can use
 
@@ -193,8 +227,8 @@ When you send a message:
        │
        ▼
 ┌─────────────────────────────┐
-│   OpenRouter API            │
-│   (Claude Sonnet 4.5)      │
+│   OpenRouter / Anthropic    │
+│   API (Claude Sonnet 4.5)   │
 └─────────────────────────────┘
        ▲
        │
@@ -223,18 +257,36 @@ See [OpenRouter models](https://openrouter.ai/models) for all available options.
 
 ## Troubleshooting
 
-### "OPENROUTER_API_KEY environment variable is not set"
+### "neither OPENROUTER_API_KEY nor ANTHROPIC_API_KEY environment variable is set"
 
-Make sure you've set the environment variable:
+Make sure you've set one of the environment variables:
+
+**For OpenRouter:**
 ```bash
 export OPENROUTER_API_KEY="your-key-here"
 ```
 
+**For Anthropic:**
+```bash
+export ANTHROPIC_API_KEY="your-key-here"
+```
+
 ### API Errors
 
+**For OpenRouter:**
 - Verify your API key is valid at [openrouter.ai/keys](https://openrouter.ai/keys)
 - Check that you have credits in your OpenRouter account
 - Ensure you have internet connectivity
+
+**For Anthropic:**
+- Verify your API key is valid at [console.anthropic.com](https://console.anthropic.com)
+- Check your usage limits and billing settings
+- Ensure you have internet connectivity
+
+**For Custom APIs:**
+- Verify your `ANTHROPIC_BASE_URL` is correct and accessible
+- Check that your custom API is compatible with Anthropic's API format
+- Verify authentication credentials
 
 ### Build Errors
 
